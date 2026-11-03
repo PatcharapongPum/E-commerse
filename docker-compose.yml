@@ -1,0 +1,195 @@
+services:
+  # ==========================================
+  # Message Broker (RabbitMQ)
+  # ==========================================
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: ecom-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP protocol
+      - "15672:15672"   # Management Web UI
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  # ==========================================
+  # Dedicated Databases (Database per Service)
+  # ==========================================
+  auth-db:
+    image: mongo:7.0
+    container_name: ecom-auth-db
+    ports:
+      - "27018:27017"
+    volumes:
+      - auth_data:/data/db
+
+  product-db:
+    image: mongo:7.0
+    container_name: ecom-product-db
+    ports:
+      - "27019:27017"
+    volumes:
+      - product_data:/data/db
+
+  order-db:
+    image: mongo:7.0
+    container_name: ecom-order-db
+    ports:
+      - "27020:27017"
+    volumes:
+      - order_data:/data/db
+
+  payment-db:
+    image: mongo:7.0
+    container_name: ecom-payment-db
+    ports:
+      - "27021:27017"
+    volumes:
+      - payment_data:/data/db
+
+  # Dedicated Database for Plugin
+  shipping-db:
+    image: mongo:7.0
+    container_name: ecom-shipping-db
+    profiles: ["plugin"]
+    ports:
+      - "27022:27017"
+    volumes:
+      - shipping_data:/data/db
+
+  # ==========================================
+  # Core Microservices
+  # ==========================================
+  auth-service:
+    build: ./services/auth-service
+    container_name: ecom-auth-service
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+      - MONGO_URI=mongodb://auth-db:27017/auth_db
+      - JWT_SECRET=my_secret_key_123
+    depends_on:
+      - auth-db
+
+  product-service:
+    build: ./services/product-service
+    container_name: ecom-product-service
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - MONGO_URI=mongodb://product-db:27017/product_db
+      - JWT_SECRET=my_secret_key_123
+    depends_on:
+      - product-db
+
+  order-service:
+    build: ./services/order-service
+    container_name: ecom-order-service
+    ports:
+      - "5003:5003"
+    environment:
+      - PORT=5003
+      - MONGO_URI=mongodb://order-db:27017/order_db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - JWT_SECRET=my_secret_key_123
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      order-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  payment-service:
+    build: ./services/payment-service
+    container_name: ecom-payment-service
+    ports:
+      - "5004:5004"
+    environment:
+      - PORT=5004
+      - MONGO_URI=mongodb://payment-db:27017/payment_db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+    depends_on:
+      payment-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  # ==========================================
+  # Plugin: Shipping & Tracking (Switchable TAG: p1 or p2)
+  # ==========================================
+  shipping-plugin:
+    image: shipping-plugin:${PLUGIN_TAG:-p1}
+    build:
+      context: ./services/shipping-plugin
+      args:
+        ALGO: ${PLUGIN_TAG:-p1}
+    container_name: ecom-shipping-plugin
+    profiles: ["plugin"]
+    ports:
+      - "5005:5005"
+    environment:
+      - PORT=5005
+      - MONGO_URI=mongodb://shipping-db:27017/shipping_db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - ALGORITHM_VERSION=${PLUGIN_TAG:-p1}
+    depends_on:
+      shipping-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+
+  # ==========================================
+  # API Gateway
+  # ==========================================
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: ecom-api-gateway
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - AUTH_SERVICE_URL=http://auth-service:5001
+      - PRODUCT_SERVICE_URL=http://product-service:5002
+      - ORDER_SERVICE_URL=http://order-service:5003
+      - PAYMENT_SERVICE_URL=http://payment-service:5004
+      - SHIPPING_SERVICE_URL=http://shipping-plugin:5005
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      - auth-service
+      - product-service
+      - order-service
+      - payment-service
+
+  # ==========================================
+  # Frontend (Vite + React)
+  # ==========================================
+  frontend:
+    build: ./frontend
+    container_name: ecom-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-gateway
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+# ==========================================
+# Volumes
+# ==========================================
+volumes:
+  auth_data:
+  product_data:
+  order_data:
+  payment_data:
+  shipping_data:
+  uploads_data:
